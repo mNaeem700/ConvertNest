@@ -1,0 +1,6 @@
+{
+  "name": "ConvertNest",
+  "description": "Free online universal file converter that converts documents, images, spreadsheets, presentations, eBooks, code files, fonts, archives, CAD files instantly.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
