@@ -349,6 +349,11 @@ export default function CodeToolbox() {
           }),
         });
 
+        const contentType = response.headers.get("content-type");
+        if (!contentType || !contentType.includes("application/json")) {
+          throw new Error("AI-powered processing requires backend APIs. Since you are running on Netlify, please deploy in our full-stack container environment to unlock AI formatting features!");
+        }
+
         if (!response.ok) {
           const errData = await response.json();
           throw new Error(errData.error || "Conversion failed");
@@ -370,6 +375,11 @@ export default function CodeToolbox() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ code, language, action }),
         });
+
+        const contentType = response.headers.get("content-type");
+        if (!contentType || !contentType.includes("application/json")) {
+          throw new Error("AI-powered processing requires backend APIs. Since you are running on Netlify, please deploy in our full-stack container environment to unlock AI formatting features!");
+        }
 
         if (!response.ok) {
           const errData = await response.json();

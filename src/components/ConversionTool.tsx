@@ -760,6 +760,11 @@ export default function ConversionTool({ onAddToHistory, isDark }: ConversionToo
         }),
       });
 
+      const contentType = response.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        throw new Error("Backend service is unavailable on static hosting (like Netlify). Please use our full-stack container environment to enable advanced AI-powered conversions!");
+      }
+
       if (!response.ok) {
         const errorData = await response.json();
         throw new Error(errorData.error || "Server conversion failed");
