@@ -7,6 +7,205 @@ import {
 import JSZip from "jszip";
 import * as XLSX from "xlsx";
 import confetti from "canvas-confetti";
+import * as yaml from "js-yaml";
+import { marked } from "marked";
+import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
+
+interface ConversionToolProps {
+  onAddToHistory: (item: HistoryItem) => void;
+  isDark: boolean;
+}
+
+// Client-side docx parser using JSZip and DOMParser
+export const parseDocxClient = async (file: File): Promise<{ text: string; html: string }> => {
+  const arrayBuffer = await file.arrayBuffer();
+  const zip = await JSZip.loadAsync(arrayBuffer);
+  const docXmlText = await zip.file("word/document.xml")?.async("text");
+  
+  if (!docXmlText) {
+    throw new Error("Invalid DOCX format: word/document.xml not found");
+  }
+
+  const parser = new DOMParser();
+  const xmlDoc = parser.parseFromString(docXmlText, "application/xml");
+  const paragraphs = xmlDoc.getElementsByTagName("w:p");
+  
+  const textLines: string[] = [];
+  const htmlLines: string[] = [];
+
+  for (let i = 0; i < paragraphs.length; i++) {
+    const p = paragraphs[i];
+    const textNodes = p.getElementsByTagName("w:t");
+    let pText = "";
+    for (let j = 0; j < textNodes.length; j++) {
+      pText += textNodes[j].textContent || "";
+    }
+    textLines.push(pText);
+    htmlLines.push(`<p style="margin-bottom: 12px; line-height: 1.6;">${pText || "&nbsp;"}</p>`);
+  }
+
+  return {
+    text: textLines.join("\n"),
+    html: `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${file.name}</title></head><body style="font-family: system-ui, sans-serif; padding: 40px; max-width: 800px; margin: 0 auto; color: #333;">${htmlLines.join("")}</body></html>`,
+  };
+};
+
+// Client-side RTF to plain text cleaner
+export const cleanRtfToText = (rtfText: string): string => {
+  let text = rtfText.replace(/\\par[d]?/g, "\n");
+  text = text.replace(/\\tab/g, "\t");
+  text = text.replace(/\\['][0-9a-f]{2}/g, "");
+  text = text.replace(/\\{2}/g, "\\");
+  text = text.replace(/\\{|\\}/g, "");
+  text = text.replace(/\\(\w+)([-?\d]+)? ?/g, "");
+  text = text.replace(/[{}]/g, "");
+  return text.trim();
+};
+
+// Client-side HTML to plain text cleaner
+export const cleanHtmlToText = (htmlText: string): string => {
+  const tempEl = document.createElement("div");
+  tempEl.innerHTML = htmlText;
+  return tempEl.textContent || tempEl.innerText || "";
+};
+
+// Client-side DOCX creator from text using JSZip
+export const createDocxFromText = async (text: string): Promise<Blob> => {
+  const zip = new JSZip();
+  
+  zip.file("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>`);
+
+  zip.file("_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`);
+
+  const escapedText = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+    
+  const lines = escapedText.split(/\r?\n/);
+  const paragraphsXml = lines.map(line => `<w:p><w:r><w:t>${line}</w:t></w:r></w:p>`).join("");
+  
+  zip.file("word/document.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    ${paragraphsXml}
+  </w:body>
+</w:document>`);
+
+  return await zip.generateAsync({ type: "blob" });
+};
+
+// Client-side PDF builder using pdf-lib
+export const convertToPdfClient = async (file: File, sourceFormat: string, fallbackText?: string): Promise<{ content: string; mimeType: string; fileName: string }> => {
+  const srcLower = sourceFormat.toLowerCase();
+  const pdfDoc = await PDFDocument.create();
+  
+  if (srcLower === "png" || srcLower === "jpg" || srcLower === "jpeg") {
+    const arrayBuffer = await file.arrayBuffer();
+    let image;
+    if (srcLower === "png") {
+      image = await pdfDoc.embedPng(arrayBuffer);
+    } else {
+      image = await pdfDoc.embedJpg(arrayBuffer);
+    }
+    
+    // Size page exactly to fit image
+    const page = pdfDoc.addPage([image.width, image.height]);
+    page.drawImage(image, {
+      x: 0,
+      y: 0,
+      width: image.width,
+      height: image.height,
+    });
+    
+    const pdfBytes = await pdfDoc.save();
+    const base64 = window.btoa(String.fromCharCode(...new Uint8Array(pdfBytes)));
+    return {
+      content: base64,
+      mimeType: "application/pdf",
+      fileName: file.name.replace(/\.[^/.]+$/, "") + ".pdf",
+    };
+  } else {
+    let text = "";
+    if (fallbackText) {
+      text = fallbackText;
+    } else {
+      text = await file.text();
+    }
+    
+    // Clean RTF/HTML markers if needed
+    if (srcLower === "rtf") {
+      text = cleanRtfToText(text);
+    } else if (srcLower === "html") {
+      text = cleanHtmlToText(text);
+    }
+    
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const fontSize = 10;
+    const margin = 50;
+    const pageWidth = 612;
+    const pageHeight = 792;
+    
+    let page = pdfDoc.addPage([pageWidth, pageHeight]);
+    let y = pageHeight - margin;
+    
+    const rawLines = text.split(/\r?\n/);
+    const lines: string[] = [];
+    const maxCharsPerLine = 80;
+    
+    for (const rLine of rawLines) {
+      if (rLine.length <= maxCharsPerLine) {
+        lines.push(rLine);
+      } else {
+        let current = "";
+        const words = rLine.split(" ");
+        for (const word of words) {
+          if ((current + " " + word).length <= maxCharsPerLine) {
+            current = current ? current + " " + word : word;
+          } else {
+            lines.push(current);
+            current = word;
+          }
+        }
+        if (current) lines.push(current);
+      }
+    }
+    
+    for (const line of lines) {
+      if (y < margin + 20) {
+        page = pdfDoc.addPage([pageWidth, pageHeight]);
+        y = pageHeight - margin;
+      }
+      const cleanLine = line.replace(/[^\x20-\x7E\t]/g, " ");
+      page.drawText(cleanLine, {
+        x: margin,
+        y: y,
+        size: fontSize,
+        font,
+        color: rgb(0.1, 0.1, 0.1),
+      });
+      y -= fontSize + 4;
+    }
+    
+    const pdfBytes = await pdfDoc.save();
+    const base64 = window.btoa(String.fromCharCode(...new Uint8Array(pdfBytes)));
+    return {
+      content: base64,
+      mimeType: "application/pdf",
+      fileName: file.name.replace(/\.[^/.]+$/, "") + ".pdf",
+    };
+  }
+};
 
 interface ConversionToolProps {
   onAddToHistory: (item: HistoryItem) => void;
@@ -290,7 +489,259 @@ export default function ConversionTool({ onAddToHistory, isDark }: ConversionToo
       }
     }
 
-    // 2. Full-stack Server route conversion
+    const srcLower = item.sourceFormat.toLowerCase();
+    const tgtLower = item.targetFormat.toLowerCase();
+
+    // 2. Client-side direct conversion for standard formats (XLSX, CSV, DOCX, JSON, YAML, XML, MD, PDF)
+    let clientConversionResult: { content: string; mimeType: string; fileName: string } | null = null;
+    try {
+      const spreadsheetFormats = ["xlsx", "xls", "ods", "csv", "tsv"];
+      const dataFormats = ["json", "yaml", "yml", "xml", "csv", "ini", "toml"];
+
+      // A. DOCX to HTML / TXT / PDF
+      if (srcLower === "docx" && (tgtLower === "html" || tgtLower === "txt" || tgtLower === "text" || tgtLower === "pdf")) {
+        setQueue(prev => prev.map(q => q.id === item.id ? { ...q, progress: 50 } : q));
+        const parsedDoc = await parseDocxClient(item.file);
+        
+        if (tgtLower === "html") {
+          clientConversionResult = {
+            content: window.btoa(unescape(encodeURIComponent(parsedDoc.html))),
+            mimeType: "text/html",
+            fileName: item.name.replace(/\.[^/.]+$/, "") + ".html",
+          };
+        } else if (tgtLower === "pdf") {
+          const pdfRes = await convertToPdfClient(item.file, "txt", parsedDoc.text);
+          clientConversionResult = pdfRes;
+        } else {
+          clientConversionResult = {
+            content: window.btoa(unescape(encodeURIComponent(parsedDoc.text))),
+            mimeType: "text/plain",
+            fileName: item.name.replace(/\.[^/.]+$/, "") + ".txt",
+          };
+        }
+      }
+      // B. Conversion TO PDF (Images or Text document formats to PDF)
+      else if (tgtLower === "pdf" && (["png", "jpg", "jpeg", "txt", "md", "markdown", "csv", "tsv", "json", "xml", "yaml", "yml", "html", "rtf"].includes(srcLower))) {
+        setQueue(prev => prev.map(q => q.id === item.id ? { ...q, progress: 50 } : q));
+        const pdfRes = await convertToPdfClient(item.file, srcLower);
+        clientConversionResult = pdfRes;
+      }
+      // C. Conversion TO DOCX (TXT, MD, HTML to DOCX)
+      else if (tgtLower === "docx" && (["txt", "md", "markdown", "html"].includes(srcLower))) {
+        setQueue(prev => prev.map(q => q.id === item.id ? { ...q, progress: 50 } : q));
+        const text = await item.file.text();
+        const docxBlob = await createDocxFromText(text);
+        const binaryString = await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const binary = new Uint8Array(reader.result as ArrayBuffer);
+            let binStr = "";
+            for (let i = 0; i < binary.length; i++) {
+              binStr += String.fromCharCode(binary[i]);
+            }
+            resolve(window.btoa(binStr));
+          };
+          reader.readAsArrayBuffer(docxBlob);
+        });
+        clientConversionResult = {
+          content: binaryString,
+          mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          fileName: item.name.replace(/\.[^/.]+$/, "") + ".docx",
+        };
+      }
+      // D. RTF to TXT
+      else if (srcLower === "rtf" && (tgtLower === "txt" || tgtLower === "text")) {
+        setQueue(prev => prev.map(q => q.id === item.id ? { ...q, progress: 50 } : q));
+        const text = await item.file.text();
+        const cleanedText = cleanRtfToText(text);
+        clientConversionResult = {
+          content: window.btoa(unescape(encodeURIComponent(cleanedText))),
+          mimeType: "text/plain",
+          fileName: item.name.replace(/\.[^/.]+$/, "") + ".txt",
+        };
+      }
+      // E. HTML to TXT
+      else if (srcLower === "html" && (tgtLower === "txt" || tgtLower === "text")) {
+        setQueue(prev => prev.map(q => q.id === item.id ? { ...q, progress: 50 } : q));
+        const text = await item.file.text();
+        const cleanedText = cleanHtmlToText(text);
+        clientConversionResult = {
+          content: window.btoa(unescape(encodeURIComponent(cleanedText))),
+          mimeType: "text/plain",
+          fileName: item.name.replace(/\.[^/.]+$/, "") + ".txt",
+        };
+      }
+      // F. Spreadsheets (xlsx, xls, ods, csv, tsv)
+      else if (spreadsheetFormats.includes(srcLower) && spreadsheetFormats.includes(tgtLower)) {
+        setQueue(prev => prev.map(q => q.id === item.id ? { ...q, progress: 50 } : q));
+        const arrayBuffer = await item.file.arrayBuffer();
+        const workbook = XLSX.read(arrayBuffer, { type: "array" });
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+
+        if (tgtLower === "csv" || tgtLower === "tsv") {
+          const csvContent = XLSX.utils.sheet_to_csv(worksheet, {
+            FS: tgtLower === "tsv" ? "\t" : ",",
+          });
+          clientConversionResult = {
+            content: window.btoa(unescape(encodeURIComponent(csvContent))),
+            mimeType: tgtLower === "tsv" ? "text/tab-separated-values" : "text/csv",
+            fileName: item.name.replace(/\.[^/.]+$/, "") + `.${tgtLower}`,
+          };
+        } else if (tgtLower === "json") {
+          const jsonContent = XLSX.utils.sheet_to_json(worksheet);
+          const jsonString = JSON.stringify(jsonContent, null, 2);
+          clientConversionResult = {
+            content: window.btoa(unescape(encodeURIComponent(jsonString))),
+            mimeType: "application/json",
+            fileName: item.name.replace(/\.[^/.]+$/, "") + ".json",
+          };
+        } else if (tgtLower === "html") {
+          const htmlContent = XLSX.utils.sheet_to_html(worksheet);
+          clientConversionResult = {
+            content: window.btoa(unescape(encodeURIComponent(htmlContent))),
+            mimeType: "text/html",
+            fileName: item.name.replace(/\.[^/.]+$/, "") + ".html",
+          };
+        } else {
+          // Excel/ODS writing
+          const writeType = tgtLower === "ods" ? "ods" : "xlsx";
+          const outBuffer = XLSX.write(workbook, { bookType: writeType, type: "array" });
+          const binary = new Uint8Array(outBuffer);
+          let binaryString = "";
+          for (let i = 0; i < binary.length; i++) {
+            binaryString += String.fromCharCode(binary[i]);
+          }
+          const base64 = window.btoa(binaryString);
+          clientConversionResult = {
+            content: base64,
+            mimeType: tgtLower === "ods" ? "application/vnd.oasis.opendocument.spreadsheet" : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            fileName: item.name.replace(/\.[^/.]+$/, "") + `.${tgtLower}`,
+          };
+        }
+      }
+      // G. Data formats (json, yaml, yml, xml, csv, ini, toml)
+      else if (dataFormats.includes(srcLower) && dataFormats.includes(tgtLower)) {
+        setQueue(prev => prev.map(q => q.id === item.id ? { ...q, progress: 50 } : q));
+        const text = await item.file.text();
+        let parsedData: any = null;
+
+        if (srcLower === "json") {
+          parsedData = JSON.parse(text);
+        } else if (srcLower === "yaml" || srcLower === "yml") {
+          parsedData = yaml.load(text);
+        } else if (srcLower === "csv") {
+          const arrayBuffer = await item.file.arrayBuffer();
+          const tempWorkbook = XLSX.read(arrayBuffer, { type: "array" });
+          parsedData = XLSX.utils.sheet_to_json(tempWorkbook.Sheets[tempWorkbook.SheetNames[0]]);
+        } else {
+          parsedData = { text };
+        }
+
+        let outputText = "";
+        let mimeType = "text/plain";
+        if (tgtLower === "json") {
+          outputText = JSON.stringify(parsedData, null, 2);
+          mimeType = "application/json";
+        } else if (tgtLower === "yaml" || tgtLower === "yml") {
+          outputText = yaml.dump(parsedData);
+          mimeType = "text/yaml";
+        } else if (tgtLower === "csv") {
+          const tempSheet = XLSX.utils.json_to_sheet(Array.isArray(parsedData) ? parsedData : [parsedData]);
+          outputText = XLSX.utils.sheet_to_csv(tempSheet);
+          mimeType = "text/csv";
+        } else if (tgtLower === "xml") {
+          const buildXml = (obj: any, rootName = "root"): string => {
+            let xml = `<${rootName}>`;
+            for (const key in obj) {
+              if (Object.prototype.hasOwnProperty.call(obj, key)) {
+                const val = obj[key];
+                if (typeof val === "object" && val !== null) {
+                  xml += buildXml(val, key);
+                } else {
+                  xml += `<${key}>${val}</${key}>`;
+                }
+              }
+            }
+            xml += `</${rootName}>`;
+            return xml;
+          };
+          outputText = `<?xml version="1.0" encoding="UTF-8"?>\n` + buildXml(parsedData);
+          mimeType = "application/xml";
+        } else {
+          outputText = typeof parsedData === "string" ? parsedData : JSON.stringify(parsedData, null, 2);
+        }
+
+        clientConversionResult = {
+          content: window.btoa(unescape(encodeURIComponent(outputText))),
+          mimeType,
+          fileName: item.name.replace(/\.[^/.]+$/, "") + `.${tgtLower}`,
+        };
+      }
+      // H. Markdown to HTML / TXT
+      else if ((srcLower === "md" || srcLower === "markdown") && (tgtLower === "html" || tgtLower === "txt")) {
+        setQueue(prev => prev.map(q => q.id === item.id ? { ...q, progress: 50 } : q));
+        const text = await item.file.text();
+        if (tgtLower === "html") {
+          const htmlContent = marked.parse(text);
+          clientConversionResult = {
+            content: window.btoa(unescape(encodeURIComponent(htmlContent as string))),
+            mimeType: "text/html",
+            fileName: item.name.replace(/\.[^/.]+$/, "") + ".html",
+          };
+        } else {
+          clientConversionResult = {
+            content: window.btoa(unescape(encodeURIComponent(text))),
+            mimeType: "text/plain",
+            fileName: item.name.replace(/\.[^/.]+$/, "") + ".txt",
+          };
+        }
+      }
+    } catch (clientErr: any) {
+      console.warn("Direct client-side conversion failed, trying server fallback...", clientErr);
+    }
+
+    if (clientConversionResult) {
+      const binaryStr = window.atob(clientConversionResult.content);
+      const len = binaryStr.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryStr.charCodeAt(i);
+      }
+      const outputBlob = new Blob([bytes], { type: clientConversionResult.mimeType });
+      const downloadUrl = URL.createObjectURL(outputBlob);
+
+      setQueue(prev => prev.map(q => q.id === item.id ? { 
+        ...q, 
+        status: "completed", 
+        progress: 100, 
+        resultUrl: downloadUrl,
+        resultBlob: outputBlob,
+        resultName: clientConversionResult!.fileName,
+        isAiPowered: false
+      } : q));
+
+      onAddToHistory({
+        id: item.id,
+        name: item.name,
+        size: item.size,
+        sourceFormat: item.sourceFormat,
+        targetFormat: item.targetFormat,
+        timestamp: new Date().toLocaleTimeString(),
+        status: "completed",
+        resultName: clientConversionResult.fileName,
+        isAiPowered: false
+      });
+
+      confetti({
+        particleCount: 30,
+        spread: 40,
+        origin: { y: 0.8 }
+      });
+      return;
+    }
+
+    // 3. Full-stack Server route conversion fallback (for PDF/eBook or server-side only conversions)
     try {
       setQueue(prev => prev.map(q => q.id === item.id ? { ...q, progress: 40 } : q));
       
@@ -354,11 +805,17 @@ export default function ConversionTool({ onAddToHistory, isDark }: ConversionToo
 
     } catch (error: any) {
       console.error("Server conversion failed:", error);
+      
+      let userFriendlyError = error.message || "Unknown conversion error";
+      if (error instanceof TypeError || error.message?.includes("Failed to fetch") || error.message?.includes("404")) {
+        userFriendlyError = `Advanced conversions (PDF/eBook) require backend APIs. Please run ConvertNest in our full-stack container environment to enable this format!`;
+      }
+
       setQueue(prev => prev.map(q => q.id === item.id ? { 
         ...q, 
         status: "failed", 
         progress: 100, 
-        error: error.message || "Unknown conversion error" 
+        error: userFriendlyError 
       } : q));
 
       onAddToHistory({

@@ -1,6 +1,9 @@
 import React, { useState, useRef } from "react";
 import { Code, Trash2, Copy, FileText, CheckCircle2, AlertCircle, FileCode, Play, Sparkles, Upload, RefreshCw } from "lucide-react";
 import confetti from "canvas-confetti";
+import * as yaml from "js-yaml";
+import * as XLSX from "xlsx";
+import { marked } from "marked";
 
 export default function CodeToolbox() {
   const [code, setCode] = useState("");
@@ -61,6 +64,277 @@ export default function CodeToolbox() {
     setValidationResult(null);
     setOutput("");
 
+    // Helper for direct client-side execution (instant & Netlify/static hosting compatible)
+    const performClientSideToolbox = (): { success: boolean; result?: string; valid?: boolean; message?: string } => {
+      const l = language.toLowerCase();
+      const a = action.toLowerCase();
+      const t = targetLang.toLowerCase();
+
+      // 1. Syntax Validation
+      if (a === "validate") {
+        if (l === "json") {
+          try {
+            JSON.parse(code);
+            return { success: true, valid: true, message: "Valid JSON format!" };
+          } catch (e: any) {
+            return { success: true, valid: false, message: e.message };
+          }
+        }
+        if (l === "yaml" || l === "yml") {
+          try {
+            yaml.load(code);
+            return { success: true, valid: true, message: "Valid YAML format!" };
+          } catch (e: any) {
+            return { success: true, valid: false, message: e.message };
+          }
+        }
+        if (l === "xml") {
+          try {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(code, "application/xml");
+            const errorNode = doc.querySelector("parsererror");
+            if (errorNode) {
+              return { success: true, valid: false, message: errorNode.textContent || "XML parser error" };
+            }
+            return { success: true, valid: true, message: "Valid XML format!" };
+          } catch (e: any) {
+            return { success: true, valid: false, message: e.message };
+          }
+        }
+        if (l === "csv") {
+          try {
+            const lines = code.trim().split("\n");
+            if (lines.length === 0) return { success: true, valid: true, message: "Empty CSV content" };
+            const firstColCount = lines[0].split(",").length;
+            for (let i = 1; i < lines.length; i++) {
+              if (lines[i].trim() && lines[i].split(",").length !== firstColCount) {
+                return { success: true, valid: false, message: `Row ${i + 1} has mismatched column count (Expected ${firstColCount}, got ${lines[i].split(",").length})` };
+              }
+            }
+            return { success: true, valid: true, message: "Valid structured CSV format!" };
+          } catch (e: any) {
+            return { success: true, valid: false, message: e.message };
+          }
+        }
+      }
+
+      // 2. Beautify / Format Action
+      if (a === "beautify") {
+        if (l === "json") {
+          try {
+            const parsed = JSON.parse(code);
+            return { success: true, result: JSON.stringify(parsed, null, 2) };
+          } catch (e: any) {
+            return { success: false, message: "Invalid JSON: " + e.message };
+          }
+        }
+        if (l === "yaml" || l === "yml") {
+          try {
+            const parsed = yaml.load(code);
+            return { success: true, result: yaml.dump(parsed) };
+          } catch (e: any) {
+            return { success: false, message: "Invalid YAML: " + e.message };
+          }
+        }
+        if (l === "xml") {
+          try {
+            let formatted = "";
+            const reg = /(>)(<)(\/*)/g;
+            let xml = code.replace(reg, '$1\r\n$2$3');
+            let pad = 0;
+            xml.split('\r\n').forEach((node) => {
+              let indent = 0;
+              if (node.match( /.+<\/\w[^>]*>$/ )) {
+                indent = 0;
+              } else if (node.match( /^<\/\w/ )) {
+                if (pad !== 0) pad -= 1;
+              } else if (node.match( /^<\w[^>]*[^\/]>$/ )) {
+                indent = 1;
+              } else {
+                indent = 0;
+              }
+              let padding = "";
+              for (let i = 0; i < pad; i++) padding += "  ";
+              formatted += padding + node + "\r\n";
+              pad += indent;
+            });
+            return { success: true, result: formatted.trim() };
+          } catch (e: any) {
+            return { success: false, message: e.message };
+          }
+        }
+        if (l === "markdown") {
+          return { success: true, result: code.trim() };
+        }
+      }
+
+      // 3. Minify Action
+      if (a === "minify") {
+        if (l === "json") {
+          try {
+            const parsed = JSON.parse(code);
+            return { success: true, result: JSON.stringify(parsed) };
+          } catch (e: any) {
+            return { success: false, message: "Invalid JSON: " + e.message };
+          }
+        }
+        if (l === "yaml" || l === "yml") {
+          try {
+            const parsed = yaml.load(code);
+            return { success: true, result: JSON.stringify(parsed) }; // valid minified YAML
+          } catch (e: any) {
+            return { success: false, message: "Invalid YAML: " + e.message };
+          }
+        }
+        if (l === "xml") {
+          try {
+            const minified = code.replace(/>\s+</g, '><').trim();
+            return { success: true, result: minified };
+          } catch (e: any) {
+            return { success: false, message: e.message };
+          }
+        }
+      }
+
+      // 4. Translate / Convert Code
+      if (a === "convert") {
+        try {
+          let parsed: any = null;
+
+          if (l === "json") {
+            parsed = JSON.parse(code);
+          } else if (l === "yaml" || l === "yml") {
+            parsed = yaml.load(code);
+          } else if (l === "csv") {
+            const workbook = XLSX.read(code, { type: "string" });
+            parsed = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+          } else if (l === "markdown") {
+            if (t === "html") {
+              const html = marked.parse(code);
+              return { success: true, result: html as string };
+            } else if (t === "txt") {
+              return { success: true, result: code };
+            }
+          } else if (l === "xml") {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(code, "application/xml");
+            
+            const xmlToJson = (xml: Node): any => {
+              let obj: any = {};
+              if (xml.nodeType === 1) { // element
+                if ((xml as Element).attributes.length > 0) {
+                  obj["@attributes"] = {};
+                  for (let j = 0; j < (xml as Element).attributes.length; j++) {
+                    const attribute = (xml as Element).attributes.item(j);
+                    if (attribute) obj["@attributes"][attribute.nodeName] = attribute.nodeValue;
+                  }
+                }
+              } else if (xml.nodeType === 3) { // text
+                obj = xml.nodeValue;
+              }
+              if (xml.hasChildNodes()) {
+                for (let i = 0; i < xml.childNodes.length; i++) {
+                  const item = xml.childNodes.item(i);
+                  const nodeName = item.nodeName;
+                  if (nodeName === "#text") {
+                    const val = item.nodeValue?.trim();
+                    if (val) {
+                      if (xml.childNodes.length === 1) return val;
+                      obj["#text"] = val;
+                    }
+                  } else {
+                    if (obj[nodeName] === undefined) {
+                      obj[nodeName] = xmlToJson(item);
+                    } else {
+                      if (!Array.isArray(obj[nodeName])) {
+                        const old = obj[nodeName];
+                        obj[nodeName] = [];
+                        obj[nodeName].push(old);
+                      }
+                      obj[nodeName].push(xmlToJson(item));
+                    }
+                  }
+                }
+              }
+              return obj;
+            };
+            parsed = xmlToJson(doc.documentElement);
+          }
+
+          if (parsed !== null) {
+            if (t === "json") {
+              return { success: true, result: JSON.stringify(parsed, null, 2) };
+            } else if (t === "yaml") {
+              return { success: true, result: yaml.dump(parsed) };
+            } else if (t === "xml") {
+              const buildXml = (obj: any, rootName = "root"): string => {
+                let xml = `<${rootName}>`;
+                for (const key in obj) {
+                  if (Object.prototype.hasOwnProperty.call(obj, key)) {
+                    const val = obj[key];
+                    if (typeof val === "object" && val !== null) {
+                      xml += buildXml(val, key);
+                    } else {
+                      xml += `<${key}>${val}</${key}>`;
+                    }
+                  }
+                }
+                xml += `</${rootName}>`;
+                return xml;
+              };
+              return { success: true, result: `<?xml version="1.0" encoding="UTF-8"?>\n` + buildXml(parsed) };
+            } else if (t === "csv") {
+              const tempSheet = XLSX.utils.json_to_sheet(Array.isArray(parsed) ? parsed : [parsed]);
+              const csv = XLSX.utils.sheet_to_csv(tempSheet);
+              return { success: true, result: csv };
+            } else if (t === "tsv") {
+              const tempSheet = XLSX.utils.json_to_sheet(Array.isArray(parsed) ? parsed : [parsed]);
+              const tsv = XLSX.utils.sheet_to_csv(tempSheet, { FS: "\t" });
+              return { success: true, result: tsv };
+            }
+          }
+        } catch (e: any) {
+          return { success: false, message: e.message };
+        }
+      }
+
+      return { success: false };
+    };
+
+    const clientResult = performClientSideToolbox();
+    if (clientResult.success) {
+      if (action === "validate") {
+        setValidationResult({
+          valid: !!clientResult.valid,
+          message: clientResult.message || "",
+        });
+        if (clientResult.valid) {
+          confetti({
+            particleCount: 20,
+            spread: 30,
+            origin: { y: 0.8 }
+          });
+        }
+      } else {
+        setOutput(clientResult.result || "");
+      }
+      setIsLoading(false);
+      return;
+    } else if (clientResult.message) {
+      // Client ran but failed with custom parse message
+      if (action === "validate") {
+        setValidationResult({
+          valid: false,
+          message: clientResult.message,
+        });
+      } else {
+        setOutput(`Error: ${clientResult.message}`);
+      }
+      setIsLoading(false);
+      return;
+    }
+
+    // 5. Full-stack Server route fallback (for complex AI-driven actions)
     try {
       // If action is conversion
       if (action === "convert") {
@@ -122,10 +396,16 @@ export default function CodeToolbox() {
       }
     } catch (error: any) {
       console.error("Code toolbox execution failed:", error);
+      
+      let userFriendlyError = error.message || "An error occurred while processing the request.";
+      if (error instanceof TypeError || error.message?.includes("Failed to fetch") || error.message?.includes("404")) {
+        userFriendlyError = `AI-powered processing requires backend APIs. Since you are running on Netlify, please deploy in our full-stack container environment to unlock AI formatting features!`;
+      }
+
       if (action === "validate") {
-        setValidationResult({ valid: false, message: error.message || "An error occurred during syntax validation" });
+        setValidationResult({ valid: false, message: userFriendlyError });
       } else {
-        setOutput(`Error: ${error.message || "An error occurred while processing the request."}`);
+        setOutput(`Error: ${userFriendlyError}`);
       }
     } finally {
       setIsLoading(false);
