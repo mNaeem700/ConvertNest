@@ -388,6 +388,8 @@ ${code}`;
   }
 });
 
+export { app };
+
 // Setup Vite Dev Middleware / Static file serving
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
@@ -411,4 +413,6 @@ async function startServer() {
   });
 }
 
-startServer();
+if (!process.env.NETLIFY && !process.env.AWS_LAMBDA_FUNCTION_NAME) {
+  startServer();
+}
